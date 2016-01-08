@@ -100,6 +100,12 @@ public class RowNumberOperator
         {
             closed = true;
         }
+
+        @Override
+        public OperatorFactory duplicate()
+        {
+            return new RowNumberOperatorFactory(operatorId, sourceTypes, outputChannels, partitionChannels, partitionTypes, maxRowsPerPartition, hashChannel, expectedPositions);
+        }
     }
 
     private final OperatorContext operatorContext;
@@ -135,7 +141,7 @@ public class RowNumberOperator
         }
         else {
             int[] channels = Ints.toArray(partitionChannels);
-            this.groupByHash = Optional.of(createGroupByHash(partitionTypes, channels, Optional.<Integer>empty(), hashChannel, expectedPositions));
+            this.groupByHash = Optional.of(createGroupByHash(operatorContext.getSession(), partitionTypes, channels, Optional.<Integer>empty(), hashChannel, expectedPositions));
         }
         this.types = toTypes(sourceTypes, outputChannels);
     }

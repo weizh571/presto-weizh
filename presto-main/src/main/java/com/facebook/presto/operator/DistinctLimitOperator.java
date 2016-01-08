@@ -70,6 +70,12 @@ public class DistinctLimitOperator
         {
             closed = true;
         }
+
+        @Override
+        public OperatorFactory duplicate()
+        {
+            return new DistinctLimitOperatorFactory(operatorId, types, distinctChannels, limit, hashChannel);
+        }
     }
 
     private final OperatorContext operatorContext;
@@ -96,7 +102,13 @@ public class DistinctLimitOperator
         for (int channel : distinctChannels) {
             distinctTypes.add(types.get(channel));
         }
-        this.groupByHash = createGroupByHash(distinctTypes.build(), Ints.toArray(distinctChannels), Optional.<Integer>empty(), hashChannel, Math.min((int) limit, 10_000));
+        this.groupByHash = createGroupByHash(
+                operatorContext.getSession(),
+                distinctTypes.build(),
+                Ints.toArray(distinctChannels),
+                Optional.empty(),
+                hashChannel,
+                Math.min((int) limit, 10_000));
         this.pageBuilder = new PageBuilder(types);
         remainingLimit = limit;
     }

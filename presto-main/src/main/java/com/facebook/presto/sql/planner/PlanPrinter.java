@@ -26,11 +26,11 @@ import com.facebook.presto.spi.predicate.Marker;
 import com.facebook.presto.spi.predicate.Range;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.facebook.presto.spi.type.Type;
-import com.facebook.presto.sql.planner.PlanFragment.OutputPartitioning;
 import com.facebook.presto.sql.planner.PlanFragment.PlanDistribution;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.DistinctLimitNode;
+import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.IndexJoinNode;
@@ -49,7 +49,7 @@ import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.SampleNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.facebook.presto.sql.planner.plan.SortNode;
-import com.facebook.presto.sql.planner.plan.TableCommitNode;
+import com.facebook.presto.sql.planner.plan.TableFinishNode;
 import com.facebook.presto.sql.planner.plan.TableScanNode;
 import com.facebook.presto.sql.planner.plan.TableWriterNode;
 import com.facebook.presto.sql.planner.plan.TopNNode;
@@ -63,7 +63,6 @@ import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.QualifiedNameReference;
 import com.facebook.presto.util.GraphvizPrinter;
-import com.facebook.presto.util.ImmutableCollectors;
 import com.google.common.base.Functions;
 import com.google.common.base.Joiner;
 import com.google.common.base.Strings;
@@ -85,7 +84,7 @@ import java.util.stream.Stream;
 
 import static com.facebook.presto.spi.type.VarcharType.VARCHAR;
 import static com.facebook.presto.sql.planner.DomainUtils.simplifyDomain;
-import static com.facebook.presto.sql.planner.PlanFragment.NullPartitioning.REPLICATE;
+import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -140,15 +139,20 @@ public class PlanPrinter
                     .append(format("Output layout: [%s]\n",
                             Joiner.on(", ").join(fragment.getOutputLayout())));
 
-            if (fragment.getOutputPartitioning() == OutputPartitioning.HASH) {
-                List<Symbol> symbols = fragment.getPartitionBy().orElseGet(() -> ImmutableList.of(new Symbol("(absent)")));
+            if (fragment.getPartitionFunction().isPresent()) {
+                PartitionFunctionBinding partitionFunction = fragment.getPartitionFunction().get();
+                PartitionFunctionHandle outputPartitioning = partitionFunction.getFunctionHandle();
+                boolean replicateNulls = partitionFunction.isReplicateNulls();
+                List<Symbol> symbols = partitionFunction.getPartitioningColumns();
                 builder.append(indentString(1));
-                if (Optional.of(REPLICATE).equals(fragment.getNullPartitionPolicy())) {
-                    builder.append(format("Output partitioning: (replicate nulls) [%s]\n",
+                if (replicateNulls) {
+                    builder.append(format("Output partitioning: %s (replicate nulls) [%s]\n",
+                            outputPartitioning,
                             Joiner.on(", ").join(symbols)));
                 }
                 else {
-                    builder.append(format("Output partitioning: [%s]\n",
+                    builder.append(format("Output partitioning: %s [%s]\n",
+                            outputPartitioning,
                             Joiner.on(", ").join(symbols)));
                 }
             }
@@ -162,7 +166,14 @@ public class PlanPrinter
 
     public static String graphvizLogicalPlan(PlanNode plan, Map<Symbol, Type> types)
     {
-        PlanFragment fragment = new PlanFragment(new PlanFragmentId("graphviz_plan"), plan, types, plan.getOutputSymbols(), PlanDistribution.SINGLE, plan.getId(), OutputPartitioning.NONE, Optional.empty(), Optional.empty(), Optional.empty());
+        PlanFragment fragment = new PlanFragment(
+                new PlanFragmentId("graphviz_plan"),
+                plan,
+                types,
+                plan.getOutputSymbols(),
+                PlanDistribution.SINGLE,
+                plan.getId(),
+                Optional.empty());
         return GraphvizPrinter.printLogical(ImmutableList.of(fragment));
     }
 
@@ -320,11 +331,11 @@ public class PlanPrinter
             if (!partitionBy.isEmpty()) {
                 List<Symbol> prePartitioned = node.getPartitionBy().stream()
                         .filter(node.getPrePartitionedInputs()::contains)
-                        .collect(ImmutableCollectors.toImmutableList());
+                        .collect(toImmutableList());
 
                 List<Symbol> notPrePartitioned = node.getPartitionBy().stream()
                         .filter(column -> !node.getPrePartitionedInputs().contains(column))
-                        .collect(ImmutableCollectors.toImmutableList());
+                        .collect(toImmutableList());
 
                 StringBuilder builder = new StringBuilder();
                 if (!prePartitioned.isEmpty()) {
@@ -546,7 +557,7 @@ public class PlanPrinter
         }
 
         @Override
-        public Void visitTableCommit(TableCommitNode node, Integer indent)
+        public Void visitTableFinish(TableFinishNode node, Integer indent)
         {
             print(indent, "- TableCommit[%s] => [%s]", node.getTarget(), formatOutputs(node.getOutputSymbols()));
 
@@ -581,6 +592,14 @@ public class PlanPrinter
         public Void visitMetadataDelete(MetadataDeleteNode node, Integer indent)
         {
             print(indent, "- MetadataDelete[%s] => [%s]", node.getTarget(), formatOutputs(node.getOutputSymbols()));
+
+            return processChildren(node, indent + 1);
+        }
+
+        @Override
+        public Void visitEnforceSingleRow(EnforceSingleRowNode node, Integer indent)
+        {
+            print(indent, "- Scalar => [%s]", formatOutputs(node.getOutputSymbols()));
 
             return processChildren(node, indent + 1);
         }

@@ -31,6 +31,7 @@ import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.DistinctLimitNode;
+import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.IndexJoinNode;
@@ -46,7 +47,7 @@ import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.SampleNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.facebook.presto.sql.planner.plan.SortNode;
-import com.facebook.presto.sql.planner.plan.TableCommitNode;
+import com.facebook.presto.sql.planner.plan.TableFinishNode;
 import com.facebook.presto.sql.planner.plan.TableScanNode;
 import com.facebook.presto.sql.planner.plan.TableWriterNode;
 import com.facebook.presto.sql.planner.plan.TopNNode;
@@ -77,7 +78,6 @@ import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Glo
 import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Global.distributed;
 import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Global.undistributed;
 import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Partitioning.hashPartitioned;
-import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Partitioning.hashPartitionedWithReplicatedNulls;
 import static com.facebook.presto.sql.planner.optimizations.ActualProperties.Partitioning.partitioned;
 import static com.facebook.presto.util.ImmutableCollectors.toImmutableList;
 import static com.facebook.presto.util.ImmutableCollectors.toImmutableSet;
@@ -124,6 +124,12 @@ class PropertyDerivations
 
         @Override
         public ActualProperties visitOutput(OutputNode node, List<ActualProperties> inputProperties)
+        {
+            return Iterables.getOnlyElement(inputProperties);
+        }
+
+        @Override
+        public ActualProperties visitEnforceSingleRow(EnforceSingleRowNode node, List<ActualProperties> inputProperties)
         {
             return Iterables.getOnlyElement(inputProperties);
         }
@@ -250,7 +256,7 @@ class PropertyDerivations
         }
 
         @Override
-        public ActualProperties visitTableCommit(TableCommitNode node, List<ActualProperties> inputProperties)
+        public ActualProperties visitTableFinish(TableFinishNode node, List<ActualProperties> inputProperties)
         {
             return ActualProperties.builder()
                     .global(coordinatorOnly())
@@ -373,11 +379,6 @@ class PropertyDerivations
                     }
                     return ActualProperties.builder()
                             .global(distributed(hashPartitioned(node.getPartitionKeys().get())))
-                            .constants(constants)
-                            .build();
-                case REPARTITION_WITH_NULL_REPLICATION:
-                    return ActualProperties.builder()
-                            .global(distributed(hashPartitionedWithReplicatedNulls(node.getPartitionKeys().get())))
                             .constants(constants)
                             .build();
                 case REPLICATE:

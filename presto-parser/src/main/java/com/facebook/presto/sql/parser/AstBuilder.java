@@ -23,13 +23,18 @@ import com.facebook.presto.sql.tree.ArithmeticBinaryExpression;
 import com.facebook.presto.sql.tree.ArithmeticUnaryExpression;
 import com.facebook.presto.sql.tree.ArrayConstructor;
 import com.facebook.presto.sql.tree.BetweenPredicate;
+import com.facebook.presto.sql.tree.BinaryLiteral;
 import com.facebook.presto.sql.tree.BooleanLiteral;
+import com.facebook.presto.sql.tree.Call;
+import com.facebook.presto.sql.tree.CallArgument;
 import com.facebook.presto.sql.tree.Cast;
 import com.facebook.presto.sql.tree.CoalesceExpression;
+import com.facebook.presto.sql.tree.Commit;
 import com.facebook.presto.sql.tree.ComparisonExpression;
 import com.facebook.presto.sql.tree.CreateTable;
 import com.facebook.presto.sql.tree.CreateTableAsSelect;
 import com.facebook.presto.sql.tree.CreateView;
+import com.facebook.presto.sql.tree.Cube;
 import com.facebook.presto.sql.tree.CurrentTime;
 import com.facebook.presto.sql.tree.Delete;
 import com.facebook.presto.sql.tree.DereferenceExpression;
@@ -47,6 +52,8 @@ import com.facebook.presto.sql.tree.Extract;
 import com.facebook.presto.sql.tree.FrameBound;
 import com.facebook.presto.sql.tree.FunctionCall;
 import com.facebook.presto.sql.tree.GenericLiteral;
+import com.facebook.presto.sql.tree.GroupingElement;
+import com.facebook.presto.sql.tree.GroupingSets;
 import com.facebook.presto.sql.tree.IfExpression;
 import com.facebook.presto.sql.tree.InListExpression;
 import com.facebook.presto.sql.tree.InPredicate;
@@ -55,6 +62,7 @@ import com.facebook.presto.sql.tree.Intersect;
 import com.facebook.presto.sql.tree.IntervalLiteral;
 import com.facebook.presto.sql.tree.IsNotNullPredicate;
 import com.facebook.presto.sql.tree.IsNullPredicate;
+import com.facebook.presto.sql.tree.Isolation;
 import com.facebook.presto.sql.tree.Join;
 import com.facebook.presto.sql.tree.JoinCriteria;
 import com.facebook.presto.sql.tree.JoinOn;
@@ -78,6 +86,8 @@ import com.facebook.presto.sql.tree.Relation;
 import com.facebook.presto.sql.tree.RenameColumn;
 import com.facebook.presto.sql.tree.RenameTable;
 import com.facebook.presto.sql.tree.ResetSession;
+import com.facebook.presto.sql.tree.Rollback;
+import com.facebook.presto.sql.tree.Rollup;
 import com.facebook.presto.sql.tree.Row;
 import com.facebook.presto.sql.tree.SampledRelation;
 import com.facebook.presto.sql.tree.SearchedCaseExpression;
@@ -92,8 +102,10 @@ import com.facebook.presto.sql.tree.ShowSchemas;
 import com.facebook.presto.sql.tree.ShowSession;
 import com.facebook.presto.sql.tree.ShowTables;
 import com.facebook.presto.sql.tree.SimpleCaseExpression;
+import com.facebook.presto.sql.tree.SimpleGroupBy;
 import com.facebook.presto.sql.tree.SingleColumn;
 import com.facebook.presto.sql.tree.SortItem;
+import com.facebook.presto.sql.tree.StartTransaction;
 import com.facebook.presto.sql.tree.Statement;
 import com.facebook.presto.sql.tree.StringLiteral;
 import com.facebook.presto.sql.tree.SubqueryExpression;
@@ -103,6 +115,8 @@ import com.facebook.presto.sql.tree.TableElement;
 import com.facebook.presto.sql.tree.TableSubquery;
 import com.facebook.presto.sql.tree.TimeLiteral;
 import com.facebook.presto.sql.tree.TimestampLiteral;
+import com.facebook.presto.sql.tree.TransactionAccessMode;
+import com.facebook.presto.sql.tree.TransactionMode;
 import com.facebook.presto.sql.tree.Union;
 import com.facebook.presto.sql.tree.Unnest;
 import com.facebook.presto.sql.tree.Use;
@@ -124,9 +138,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.toList;
 
 class AstBuilder
         extends SqlBaseBaseVisitor<Node>
@@ -232,6 +246,69 @@ class AstBuilder
                 context.REPLACE() != null);
     }
 
+    @Override
+    public Node visitStartTransaction(SqlBaseParser.StartTransactionContext context)
+    {
+        return new StartTransaction(visit(context.transactionMode(), TransactionMode.class));
+    }
+
+    @Override
+    public Node visitCommit(SqlBaseParser.CommitContext context)
+    {
+        return new Commit(getLocation(context));
+    }
+
+    @Override
+    public Node visitRollback(SqlBaseParser.RollbackContext context)
+    {
+        return new Rollback(getLocation(context));
+    }
+
+    @Override
+    public Node visitTransactionAccessMode(SqlBaseParser.TransactionAccessModeContext context)
+    {
+        return new TransactionAccessMode(getLocation(context), context.accessMode.getType() == SqlBaseLexer.ONLY);
+    }
+
+    @Override
+    public Node visitIsolationLevel(SqlBaseParser.IsolationLevelContext context)
+    {
+        return visit(context.levelOfIsolation());
+    }
+
+    @Override
+    public Node visitReadUncommitted(SqlBaseParser.ReadUncommittedContext context)
+    {
+        return new Isolation(getLocation(context), Isolation.Level.READ_UNCOMMITTED);
+    }
+
+    @Override
+    public Node visitReadCommitted(SqlBaseParser.ReadCommittedContext context)
+    {
+        return new Isolation(getLocation(context), Isolation.Level.READ_COMMITTED);
+    }
+
+    @Override
+    public Node visitRepeatableRead(SqlBaseParser.RepeatableReadContext context)
+    {
+        return new Isolation(getLocation(context), Isolation.Level.REPEATABLE_READ);
+    }
+
+    @Override
+    public Node visitSerializable(SqlBaseParser.SerializableContext context)
+    {
+        return new Isolation(getLocation(context), Isolation.Level.SERIALIZABLE);
+    }
+
+    @Override
+    public Node visitCall(SqlBaseParser.CallContext context)
+    {
+        return new Call(
+                getLocation(context),
+                getQualifiedName(context.qualifiedName()),
+                visit(context.callArgument(), CallArgument.class));
+    }
+
     // ********************** query expressions ********************
 
     @Override
@@ -324,10 +401,42 @@ class AstBuilder
                 new Select(getLocation(context.SELECT()), isDistinct(context.setQuantifier()), visit(context.selectItem(), SelectItem.class)),
                 from,
                 visitIfPresent(context.where, Expression.class),
-                visit(context.groupBy, Expression.class),
+                visit(context.groupingElement(), GroupingElement.class),
                 visitIfPresent(context.having, Expression.class),
                 ImmutableList.of(),
                 Optional.<String>empty());
+    }
+
+    @Override
+    public Node visitSingleGroupingSet(SqlBaseParser.SingleGroupingSetContext context)
+    {
+        return new SimpleGroupBy(getLocation(context), visit(context.groupingExpressions().expression(), Expression.class));
+    }
+
+    @Override
+    public Node visitRollup(SqlBaseParser.RollupContext context)
+    {
+        return new Rollup(getLocation(context), context.qualifiedName().stream()
+                .map(AstBuilder::getQualifiedName)
+                .collect(toList()));
+    }
+
+    @Override
+    public Node visitCube(SqlBaseParser.CubeContext context)
+    {
+        return new Cube(getLocation(context), context.qualifiedName().stream()
+                .map(AstBuilder::getQualifiedName)
+                .collect(toList()));
+    }
+
+    @Override
+    public Node visitMultipleGroupingSets(SqlBaseParser.MultipleGroupingSetsContext context)
+    {
+        return new GroupingSets(getLocation(context), context.groupingSet().stream()
+                .map(groupingSet -> groupingSet.qualifiedName().stream()
+                        .map(AstBuilder::getQualifiedName)
+                        .collect(toList()))
+                .collect(toList()));
     }
 
     @Override
@@ -527,7 +636,7 @@ class AstBuilder
                 List<String> columns = context.joinCriteria()
                         .identifier().stream()
                         .map(ParseTree::getText)
-                        .collect(Collectors.toList());
+                        .collect(toList());
 
                 criteria = new JoinUsing(columns);
             }
@@ -848,6 +957,7 @@ class AstBuilder
         return new FunctionCall(getLocation(context), new QualifiedName("strpos"), arguments);
     }
 
+    @Override
     public Node visitNormalize(SqlBaseParser.NormalizeContext context)
     {
         Expression str = (Expression) visit(context.valueExpression());
@@ -929,7 +1039,7 @@ class AstBuilder
                     (Expression) visit(context.expression(1)),
                     elseExpression);
         }
-        else if (name.toString().equalsIgnoreCase("nullif")) {
+        if (name.toString().equalsIgnoreCase("nullif")) {
             check(context.expression().size() == 2, "Invalid number of arguments for 'nullif' function", context);
             check(!window.isPresent(), "OVER clause not valid for 'nullif' function", context);
             check(!distinct, "DISTINCT not valid for 'nullif' function", context);
@@ -939,7 +1049,7 @@ class AstBuilder
                     (Expression) visit(context.expression(0)),
                     (Expression) visit(context.expression(1)));
         }
-        else if (name.toString().equalsIgnoreCase("coalesce")) {
+        if (name.toString().equalsIgnoreCase("coalesce")) {
             check(!window.isPresent(), "OVER clause not valid for 'coalesce' function", context);
             check(!distinct, "DISTINCT not valid for 'coalesce' function", context);
 
@@ -959,7 +1069,7 @@ class AstBuilder
     {
         List<String> arguments = context.identifier().stream()
                 .map(SqlBaseParser.IdentifierContext::getText)
-                .collect(Collectors.toList());
+                .collect(toList());
 
         Expression body = (Expression) visit(context.expression());
 
@@ -1039,6 +1149,13 @@ class AstBuilder
     }
 
     @Override
+    public Node visitBinaryLiteral(SqlBaseParser.BinaryLiteralContext context)
+    {
+        String raw = context.BINARY_LITERAL().getText();
+        return new BinaryLiteral(getLocation(context), unquote(raw.substring(1)));
+    }
+
+    @Override
     public Node visitTypeConstructor(SqlBaseParser.TypeConstructorContext context)
     {
         String type = context.identifier().getText();
@@ -1047,7 +1164,7 @@ class AstBuilder
         if (type.equalsIgnoreCase("time")) {
             return new TimeLiteral(getLocation(context), value);
         }
-        else if (type.equalsIgnoreCase("timestamp")) {
+        if (type.equalsIgnoreCase("timestamp")) {
             return new TimestampLiteral(getLocation(context), value);
         }
 
@@ -1088,6 +1205,20 @@ class AstBuilder
                         .map(AstBuilder::getIntervalFieldType));
     }
 
+    // ***************** arguments *****************
+
+    @Override
+    public Node visitPositionalArgument(SqlBaseParser.PositionalArgumentContext context)
+    {
+        return new CallArgument(getLocation(context), (Expression) visit(context.expression()));
+    }
+
+    @Override
+    public Node visitNamedArgument(SqlBaseParser.NamedArgumentContext context)
+    {
+        return new CallArgument(getLocation(context), context.identifier().getText(), (Expression) visit(context.expression()));
+    }
+
     // ***************** helpers *****************
 
     @Override
@@ -1122,12 +1253,12 @@ class AstBuilder
         return contexts.stream()
                 .map(this::visit)
                 .map(clazz::cast)
-                .collect(Collectors.toList());
+                .collect(toList());
     }
 
-    private static String unquote(String string)
+    private static String unquote(String value)
     {
-        return string.substring(1, string.length() - 1)
+        return value.substring(1, value.length() - 1)
                 .replace("''", "'");
     }
 
@@ -1136,7 +1267,7 @@ class AstBuilder
         List<String> parts = context
                 .identifier().stream()
                 .map(ParseTree::getText)
-                .collect(Collectors.toList());
+                .collect(toList());
 
         return new QualifiedName(parts);
     }
@@ -1167,7 +1298,7 @@ class AstBuilder
         return columnAliasesContext
                 .identifier().stream()
                 .map(ParseTree::getText)
-                .collect(Collectors.toList());
+                .collect(toList());
     }
 
     private static ArithmeticBinaryExpression.Type getArithmeticBinaryOperator(Token operator)

@@ -43,6 +43,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import io.airlift.concurrent.BoundedExecutor;
 import io.airlift.concurrent.MoreFutures;
 import io.airlift.json.JsonCodec;
 import io.airlift.log.Logger;
@@ -61,7 +62,6 @@ import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
 import org.apache.hadoop.hive.metastore.api.Table;
 import org.joda.time.DateTimeZone;
 
-import javax.annotation.PreDestroy;
 import javax.inject.Inject;
 
 import java.io.Closeable;
@@ -73,11 +73,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -93,6 +93,7 @@ import static com.facebook.presto.hive.HiveTableProperties.PARTITIONED_BY_PROPER
 import static com.facebook.presto.hive.HiveTableProperties.STORAGE_FORMAT_PROPERTY;
 import static com.facebook.presto.hive.HiveTableProperties.getHiveStorageFormat;
 import static com.facebook.presto.hive.HiveTableProperties.getPartitionedBy;
+import static com.facebook.presto.hive.HiveTableProperties.getRetentionDays;
 import static com.facebook.presto.hive.HiveType.toHiveType;
 import static com.facebook.presto.hive.HiveUtil.PRESTO_VIEW_FLAG;
 import static com.facebook.presto.hive.HiveUtil.decodeViewData;
@@ -114,11 +115,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.Iterables.concat;
-import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.lang.String.format;
 import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
-import static java.util.UUID.randomUUID;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static org.apache.hadoop.hive.serde.serdeConstants.STRING_TYPE_NAME;
@@ -142,7 +141,7 @@ public class HiveMetadata
     private final TypeManager typeManager;
     private final LocationService locationService;
     private final JsonCodec<PartitionUpdate> partitionUpdateCodec;
-    private final ExecutorService renameExecutionService;
+    private final BoundedExecutor renameExecution;
 
     @Inject
     @SuppressWarnings("deprecation")
@@ -170,7 +169,8 @@ public class HiveMetadata
                 hiveClientConfig.getAllowCorruptWritesForTesting(),
                 typeManager,
                 locationService,
-                partitionUpdateCodec);
+                partitionUpdateCodec,
+                executorService);
     }
 
     public HiveMetadata(
@@ -187,7 +187,8 @@ public class HiveMetadata
             boolean allowCorruptWritesForTesting,
             TypeManager typeManager,
             LocationService locationService,
-            JsonCodec<PartitionUpdate> partitionUpdateCodec)
+            JsonCodec<PartitionUpdate> partitionUpdateCodec,
+            ExecutorService executorService)
     {
         this.connectorId = requireNonNull(connectorId, "connectorId is null").toString();
 
@@ -212,13 +213,7 @@ public class HiveMetadata
                     timeZone.getID());
         }
 
-        renameExecutionService = Executors.newFixedThreadPool(maxConcurrentFileRenames, daemonThreadsNamed("HDFS-file-rename-%s"));
-    }
-
-    @PreDestroy
-    public void destroy()
-    {
-        renameExecutionService.shutdownNow();
+        renameExecution = new BoundedExecutor(executorService, maxConcurrentFileRenames);
     }
 
     public HiveMetastore getMetastore()
@@ -400,7 +395,8 @@ public class HiveMetadata
         List<String> partitionedBy = getPartitionedBy(tableMetadata.getProperties());
         List<HiveColumnHandle> columnHandles = getColumnHandles(connectorId, tableMetadata, ImmutableSet.copyOf(partitionedBy));
         HiveStorageFormat hiveStorageFormat = getHiveStorageFormat(tableMetadata.getProperties());
-        createTable(session, schemaName, tableName, tableMetadata.getOwner(), columnHandles, hiveStorageFormat, partitionedBy);
+        OptionalInt retentionDays = getRetentionDays(tableMetadata.getProperties());
+        createTable(session, schemaName, tableName, tableMetadata.getOwner(), columnHandles, hiveStorageFormat, partitionedBy, retentionDays);
     }
 
     public void createTable(
@@ -410,12 +406,13 @@ public class HiveMetadata
             String tableOwner,
             List<HiveColumnHandle> columnHandles,
             HiveStorageFormat hiveStorageFormat,
-            List<String> partitionedBy)
+            List<String> partitionedBy,
+            OptionalInt retentionDays)
     {
         LocationHandle locationHandle = locationService.forNewTable(session.getQueryId(), schemaName, tableName);
         Path targetPath = locationService.targetPathRoot(locationHandle);
         createDirectory(hdfsEnvironment, targetPath);
-        createTable(schemaName, tableName, tableOwner, columnHandles, hiveStorageFormat, partitionedBy, targetPath);
+        createTable(schemaName, tableName, tableOwner, columnHandles, hiveStorageFormat, partitionedBy, retentionDays, targetPath);
     }
 
     private Table createTable(
@@ -425,6 +422,7 @@ public class HiveMetadata
             List<HiveColumnHandle> columnHandles,
             HiveStorageFormat hiveStorageFormat,
             List<String> partitionedBy,
+            OptionalInt retentionDays,
             Path targetPath)
     {
         Map<String, HiveColumnHandle> columnHandlesByName = Maps.uniqueIndex(columnHandles, HiveColumnHandle::getName);
@@ -478,6 +476,9 @@ public class HiveMetadata
         table.setParameters(ImmutableMap.of("comment", tableComment));
         table.setPartitionKeys(partitionColumns);
         table.setSd(sd);
+        if (retentionDays.isPresent()) {
+            table.setRetention(retentionDays.getAsInt());
+        }
 
         PrivilegeGrantInfo allPrivileges = new PrivilegeGrantInfo("all", 0, tableOwner, PrincipalType.USER, true);
         table.setPrivileges(new PrincipalPrivilegeSet(
@@ -592,6 +593,7 @@ public class HiveMetadata
 
         HiveStorageFormat hiveStorageFormat = getHiveStorageFormat(tableMetadata.getProperties());
         List<String> partitionedBy = getPartitionedBy(tableMetadata.getProperties());
+        OptionalInt retentionDays = getRetentionDays(tableMetadata.getProperties());
 
         // get the root directory for the database
         SchemaTableName schemaTableName = tableMetadata.getTable();
@@ -605,11 +607,12 @@ public class HiveMetadata
                 schemaName,
                 tableName,
                 columnHandles,
-                randomUUID().toString(), // todo this should really be the queryId
+                session.getQueryId(),
                 locationService.forNewTable(session.getQueryId(), schemaName, tableName),
                 hiveStorageFormat,
                 partitionedBy,
-                tableMetadata.getOwner());
+                tableMetadata.getOwner(),
+                retentionDays);
     }
 
     @Override
@@ -649,6 +652,7 @@ public class HiveMetadata
                     handle.getInputColumns(),
                     handle.getHiveStorageFormat(),
                     handle.getPartitionedBy(),
+                    handle.getRetentionDays(),
                     targetPath);
 
             if (!handle.getPartitionedBy().isEmpty()) {
@@ -696,7 +700,7 @@ public class HiveMetadata
                 tableName.getSchemaName(),
                 tableName.getTableName(),
                 handles,
-                randomUUID().toString(), // todo this should really be the queryId
+                session.getQueryId(),
                 locationService.forExistingTable(session.getQueryId(), table.get()),
                 hiveStorageFormat);
     }
@@ -827,7 +831,7 @@ public class HiveMetadata
                                 catch (IOException e) {
                                     throw new PrestoException(HIVE_FILESYSTEM_ERROR, format("Error moving INSERT data from %s to final location %s", source, target), e);
                                 }
-                            }, renameExecutionService));
+                            }, renameExecution));
                         }
                     }
                 }

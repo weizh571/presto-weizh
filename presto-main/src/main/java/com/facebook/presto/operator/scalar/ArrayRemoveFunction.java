@@ -35,7 +35,7 @@ import static com.facebook.presto.metadata.Signature.comparableTypeParameter;
 import static com.facebook.presto.metadata.Signature.internalOperator;
 import static com.facebook.presto.spi.StandardErrorCode.INTERNAL_ERROR;
 import static com.facebook.presto.spi.type.BooleanType.BOOLEAN;
-import static com.facebook.presto.type.TypeUtils.castValue;
+import static com.facebook.presto.spi.type.TypeUtils.readNativeValue;
 import static com.facebook.presto.util.Reflection.methodHandle;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.String.format;
@@ -129,7 +129,7 @@ public final class ArrayRemoveFunction
         List<Integer> positions = new ArrayList<>();
 
         for (int i = 0; i < array.getPositionCount(); i++) {
-            Object element = castValue(type, array, i);
+            Object element = readNativeValue(type, array, i);
 
             try {
                 if (element == null || !(boolean) equalsFunction.invoke(element, value)) {
@@ -149,7 +149,11 @@ public final class ArrayRemoveFunction
             return array;
         }
 
-        BlockBuilder blockBuilder = type.createBlockBuilder(new BlockBuilderStatus(), sizeAfterRemove);
+        int entrySize = 0;
+        if (!positions.isEmpty()) {
+            entrySize = (int) Math.ceil(sizeAfterRemove / (double) positions.size());
+        }
+        BlockBuilder blockBuilder = type.createBlockBuilder(new BlockBuilderStatus(), positions.size(), entrySize);
 
         for (int position : positions) {
             type.appendTo(array, position, blockBuilder);

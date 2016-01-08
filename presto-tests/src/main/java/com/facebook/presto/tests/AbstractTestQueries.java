@@ -1233,6 +1233,56 @@ public abstract class AbstractTestQueries
     }
 
     @Test
+    public void testSingleEmptyGroupBy()
+            throws Exception
+    {
+        assertQuery(
+                "SELECT SUM(quantity) " +
+                        "FROM lineitem " +
+                        "GROUP BY ()",
+                "SELECT SUM(quantity) " +
+                        "FROM lineitem");
+    }
+
+    @Test
+    public void testSingleEmptyGroupingSet()
+            throws Exception
+    {
+        assertQuery(
+                "SELECT SUM(quantity) " +
+                        "FROM lineitem " +
+                        "GROUP BY GROUPING SETS (())",
+                "SELECT SUM(quantity) " +
+                        "FROM lineitem");
+    }
+
+    @Test
+    public void testSingleGroupingSet()
+            throws Exception
+    {
+        assertQuery(
+                "SELECT suppkey, SUM(quantity) " +
+                        "FROM lineitem " +
+                        "GROUP BY GROUPING SETS (suppkey) ",
+                "SELECT suppkey, SUM(quantity) " +
+                        "FROM lineitem " +
+                        "GROUP BY suppkey");
+    }
+
+    @Test
+    public void testSingleGroupingSetMultipleColumns()
+            throws Exception
+    {
+        assertQuery(
+                "SELECT linenumber, suppkey, SUM(quantity) " +
+                        "FROM lineitem " +
+                        "GROUP BY GROUPING SETS ((linenumber, suppkey)) ",
+                "SELECT linenumber, suppkey, SUM(quantity) " +
+                        "FROM lineitem " +
+                        "GROUP BY linenumber, suppkey");
+    }
+
+    @Test
     public void testCountAllWithComparison()
             throws Exception
     {
@@ -1805,6 +1855,22 @@ public abstract class AbstractTestQueries
                         "LEFT OUTER JOIN " +
                         "(SELECT * FROM orders WHERE orderkey < 100) b ON a.orderkey = b.orderkey " +
                         "WHERE a.orderkey IS NULL)");
+    }
+
+    @Test
+    public void testOuterJoinWithCommonExpression()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("SELECT count(1), count(one) " +
+                "FROM (values (1, 'a'), (2, 'a')) as l(k, a) " +
+                "LEFT JOIN (select k, 1 one from (values 1) as r(k)) r " +
+                "ON l.k = r.k GROUP BY a");
+
+        MaterializedResult expected = resultBuilder(getSession(), BIGINT, BIGINT)
+                .row(2, 1) // (total rows, # of non null values)
+                .build();
+
+        assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
     }
 
     @Test
@@ -3603,6 +3669,14 @@ public abstract class AbstractTestQueries
     }
 
     @Test
+    public void testTransactionsTable()
+            throws Exception
+    {
+        List<MaterializedRow> result = computeActual("SELECT * FROM system.runtime.transactions").getMaterializedRows();
+        assertTrue(result.size() >= 1); // At least one row for the current transaction.
+    }
+
+    @Test
     public void testDefaultExplainTextFormat()
     {
         String query = "SELECT * FROM orders";
@@ -3694,6 +3768,9 @@ public abstract class AbstractTestQueries
         assertExplainDdl("ALTER TABLE orders RENAME COLUMN orderkey TO new_column_name");
         assertExplainDdl("SET SESSION foo = 'bar'");
         assertExplainDdl("RESET SESSION foo");
+        assertExplainDdl("START TRANSACTION");
+        assertExplainDdl("COMMIT");
+        assertExplainDdl("ROLLBACK");
     }
 
     private void assertExplainDdl(String query)
@@ -4314,6 +4391,21 @@ public abstract class AbstractTestQueries
     }
 
     @Test
+    public void testCrossJoinUnnestWithUnion()
+            throws Exception
+    {
+        assertQuery("" +
+                "SELECT col, COUNT(*)\n" +
+                "FROM ((\n" +
+                "    SELECT ARRAY[1, 2] AS a\n" +
+                "    UNION ALL\n" +
+                "    SELECT ARRAY[1, 3] AS a)  unionresult\n" +
+                "  CROSS JOIN UNNEST(unionresult.a) t(col))\n" +
+                "GROUP BY col",
+                "SELECT * FROM VALUES (1, 2), (2, 1), (3, 1)");
+    }
+
+    @Test
     public void testJoinOnConstantExpression()
             throws Exception
     {
@@ -4448,6 +4540,68 @@ public abstract class AbstractTestQueries
                 "FROM (\n" +
                 "  SELECT CASE WHEN orderkey % 4 = 0 THEN NULL ELSE orderkey END AS orderkey\n" +
                 "  FROM orders)");
+    }
+
+    @Test
+    public void testScalarSubquery()
+            throws Exception
+    {
+        // nested
+        assertQuery("SELECT (SELECT (SELECT (SELECT 1)))");
+
+        // aggregation
+        assertQuery("SELECT * FROM lineitem WHERE orderkey = \n" +
+                "(SELECT max(orderkey) FROM orders)");
+
+        // no output
+        assertQuery("SELECT * FROM lineitem WHERE orderkey = \n" +
+                "(SELECT orderkey FROM orders WHERE 0=1)");
+
+        // no output matching with null test
+        assertQuery("SELECT * FROM lineitem WHERE \n" +
+                "(SELECT orderkey FROM orders WHERE 0=1) " +
+                "is null");
+        assertQuery("SELECT * FROM lineitem WHERE \n" +
+                "(SELECT orderkey FROM orders WHERE 0=1) " +
+                "is not null");
+
+        // subquery results and in in-predicate
+        assertQuery("SELECT (SELECT 1) IN (1, 2, 3)");
+        assertQuery("SELECT (SELECT 1) IN (   2, 3)");
+
+        // multiple subqueries
+        assertQuery("SELECT (SELECT 1) = (SELECT 3)");
+        assertQuery("SELECT (SELECT 1) < (SELECT 3)");
+        assertQuery("SELECT COUNT(*) FROM lineitem WHERE " +
+                "(SELECT min(orderkey) FROM orders)" +
+                "<" +
+                "(SELECT max(orderkey) FROM orders)");
+
+        // distinct
+        assertQuery("SELECT DISTINCT orderkey FROM lineitem " +
+                "WHERE orderkey BETWEEN" +
+                "   (SELECT avg(orderkey) FROM orders) - 10 " +
+                "   AND" +
+                "   (SELECT avg(orderkey) FROM orders) + 10");
+
+        // subqueries with joins
+        for (String joinType : ImmutableList.of("INNER", "LEFT OUTER")) {
+            assertQuery("SELECT l.orderkey, COUNT(*) " +
+                    "FROM lineitem l " + joinType + " JOIN orders o ON l.orderkey = o.orderkey " +
+                    "WHERE l.orderkey BETWEEN" +
+                    "   (SELECT avg(orderkey) FROM orders) - 10 " +
+                    "   AND" +
+                    "   (SELECT avg(orderkey) FROM orders) + 10 " +
+                    "GROUP BY l.orderkey");
+        }
+
+        // subquery returns multiple rows
+        String multipleRowsErrorMsg = "Scalar sub-query has returned multiple rows";
+        assertQueryFails("SELECT * FROM lineitem WHERE orderkey = (\n" +
+                "SELECT orderkey FROM orders ORDER BY totalprice)",
+                multipleRowsErrorMsg);
+        assertQueryFails("SELECT (VALUES (1), (2)) IN (1,2)",
+                multipleRowsErrorMsg);
     }
 
     @Test
@@ -4808,7 +4962,7 @@ public abstract class AbstractTestQueries
         computeActual("SELECT greatest(rgb(255, 0, 0))");
     }
 
-    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "\\Qline 1:10: Operator NOT_EQUAL(bigint, varchar) not registered\\E")
+    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "\\Qline 1:10: '<>' cannot be applied to bigint, varchar\\E")
     public void testTypeMismatch()
     {
         computeActual("SELECT 1 <> 'x'");
@@ -4820,10 +4974,16 @@ public abstract class AbstractTestQueries
         computeActual("SELECT CAST(null AS array<foo>)");
     }
 
-    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "\\Qline 1:21: Operator ADD(varchar, bigint) not registered\\E")
+    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "\\Qline 1:21: '+' cannot be applied to varchar, bigint\\E")
     public void testInvalidTypeInfixOperator()
     {
         computeActual("SELECT ('a' || 'z') + (3 * 4) / 5");
+    }
+
+    @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "\\Qline 1:12: Cannot check if varchar is BETWEEN bigint and varchar\\E")
+    public void testInvalidTypeBetweenOperator()
+    {
+        computeActual("SELECT 'a' BETWEEN 3 AND 'z'");
     }
 
     @Test(expectedExceptions = RuntimeException.class, expectedExceptionsMessageRegExp = "\\Qline 1:20: All ARRAY elements must be the same type: bigint\\E")
@@ -5126,6 +5286,160 @@ public abstract class AbstractTestQueries
         assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
     }
 
+    @Test
+    public void testP4ApproxSetBigint()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("SELECT cardinality(cast(approx_set(custkey) AS P4HYPERLOGLOG)) FROM orders");
+
+        MaterializedResult expected = resultBuilder(getSession(), BIGINT)
+                .row(1002)
+                .build();
+
+        assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetVarchar()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("SELECT cardinality(cast(approx_set(CAST(custkey AS VARCHAR)) AS P4HYPERLOGLOG)) FROM orders");
+
+        MaterializedResult expected = resultBuilder(getSession(), BIGINT)
+                .row(1024)
+                .build();
+
+        assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetDouble()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("SELECT cardinality(cast(approx_set(CAST(custkey AS DOUBLE)) AS P4HYPERLOGLOG)) FROM orders");
+
+        MaterializedResult expected = resultBuilder(getSession(), BIGINT)
+                .row(1014)
+                .build();
+
+        assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetBigintGroupBy()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("" +
+                "SELECT orderstatus, cardinality(cast(approx_set(custkey) AS P4HYPERLOGLOG)) " +
+                "FROM orders " +
+                "GROUP BY orderstatus");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row("O", 1001)
+                .row("F", 998)
+                .row("P", 308)
+                .build();
+
+        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetVarcharGroupBy()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("" +
+                "SELECT orderstatus, cardinality(cast(approx_set(CAST(custkey AS VARCHAR)) AS P4HYPERLOGLOG)) " +
+                "FROM orders " +
+                "GROUP BY orderstatus");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row("O", 1021)
+                .row("F", 1019)
+                .row("P", 302)
+                .build();
+
+        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetDoubleGroupBy()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("" +
+                "SELECT orderstatus, cardinality(cast(approx_set(CAST(custkey AS DOUBLE)) AS P4HYPERLOGLOG)) " +
+                "FROM orders " +
+                "GROUP BY orderstatus");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row("O", 1011)
+                .row("F", 1011)
+                .row("P", 306)
+                .build();
+
+        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetWithNulls()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("SELECT cardinality(cast(approx_set(IF(orderstatus = 'O', custkey)) AS P4HYPERLOGLOG)) FROM orders");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row(1001)
+                .build();
+
+        assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetOnlyNulls()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("SELECT cardinality(cast(approx_set(null) AS P4HYPERLOGLOG)) FROM orders");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row(new Object[] { null })
+                .build();
+
+        assertEquals(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetGroupByWithOnlyNullsInOneGroup()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("" +
+                "SELECT orderstatus, cardinality(cast(approx_set(IF(orderstatus != 'O', custkey)) AS P4HYPERLOGLOG)) " +
+                "FROM orders " +
+                "GROUP BY orderstatus");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row("O", null)
+                .row("F", 998)
+                .row("P", 308)
+                .build();
+
+        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
+
+    @Test
+    public void testP4ApproxSetGroupByWithNulls()
+            throws Exception
+    {
+        MaterializedResult actual = computeActual("" +
+                "SELECT orderstatus, cardinality(cast(approx_set(IF(custkey % 2 <> 0, custkey)) AS P4HYPERLOGLOG)) " +
+                "FROM orders " +
+                "GROUP BY orderstatus");
+
+        MaterializedResult expected = resultBuilder(getSession(), actual.getTypes())
+                .row("O", 495)
+                .row("F", 491)
+                .row("P", 153)
+                .build();
+
+        assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+    }
     @Test
     public void testValuesWithNonTrivialType()
             throws Exception

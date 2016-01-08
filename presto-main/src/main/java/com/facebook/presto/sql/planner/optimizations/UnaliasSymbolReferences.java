@@ -18,12 +18,14 @@ import com.facebook.presto.metadata.Signature;
 import com.facebook.presto.spi.block.SortOrder;
 import com.facebook.presto.spi.type.Type;
 import com.facebook.presto.sql.planner.DeterminismEvaluator;
+import com.facebook.presto.sql.planner.PartitionFunctionBinding;
 import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolAllocator;
 import com.facebook.presto.sql.planner.plan.AggregationNode;
 import com.facebook.presto.sql.planner.plan.DeleteNode;
 import com.facebook.presto.sql.planner.plan.DistinctLimitNode;
+import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.FilterNode;
 import com.facebook.presto.sql.planner.plan.IndexJoinNode;
@@ -40,7 +42,7 @@ import com.facebook.presto.sql.planner.plan.SampleNode;
 import com.facebook.presto.sql.planner.plan.SemiJoinNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.SortNode;
-import com.facebook.presto.sql.planner.plan.TableCommitNode;
+import com.facebook.presto.sql.planner.plan.TableFinishNode;
 import com.facebook.presto.sql.planner.plan.TableScanNode;
 import com.facebook.presto.sql.planner.plan.TableWriterNode;
 import com.facebook.presto.sql.planner.plan.TopNNode;
@@ -221,7 +223,14 @@ public class UnaliasSymbolReferences
             List<PlanNode> sources = node.getSources().stream()
                     .map(context::rewrite)
                     .collect(toImmutableList());
-            Optional<List<Symbol>> partitionKeys = node.getPartitionKeys().map(this::canonicalize);
+
+            Optional<PartitionFunctionBinding> partitionFunction = node.getPartitionFunction()
+                    .map(function -> new PartitionFunctionBinding(
+                            function.getFunctionHandle(),
+                            canonicalize(function.getPartitioningColumns()),
+                            canonicalize(function.getHashColumn()),
+                            function.isReplicateNulls(),
+                            function.getPartitionCount()));
 
             List<List<Symbol>> inputs = new ArrayList<>();
             for (int i = 0; i < node.getInputs().size(); i++) {
@@ -239,7 +248,7 @@ public class UnaliasSymbolReferences
                     }
                 }
             }
-            return new ExchangeNode(node.getId(), node.getType(), partitionKeys, canonicalize(node.getHashSymbol()), sources, outputs.build(), inputs);
+            return new ExchangeNode(node.getId(), node.getType(), partitionFunction, sources, outputs.build(), inputs);
         }
 
         @Override
@@ -279,7 +288,7 @@ public class UnaliasSymbolReferences
         }
 
         @Override
-        public PlanNode visitTableCommit(TableCommitNode node, RewriteContext<Void> context)
+        public PlanNode visitTableFinish(TableFinishNode node, RewriteContext<Void> context)
         {
             return context.defaultRewrite(node);
         }
@@ -367,6 +376,14 @@ public class UnaliasSymbolReferences
 
             List<Symbol> canonical = Lists.transform(node.getOutputSymbols(), this::canonicalize);
             return new OutputNode(node.getId(), source, node.getColumnNames(), canonical);
+        }
+
+        @Override
+        public PlanNode visitEnforceSingleRow(EnforceSingleRowNode node, RewriteContext<Void> context)
+        {
+            PlanNode source = context.rewrite(node.getSource());
+
+            return new EnforceSingleRowNode(node.getId(), source);
         }
 
         @Override

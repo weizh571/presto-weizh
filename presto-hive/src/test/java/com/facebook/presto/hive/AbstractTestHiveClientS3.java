@@ -149,8 +149,8 @@ public abstract class AbstractTestHiveClientS3
         HivePartitionManager hivePartitionManager = new HivePartitionManager(connectorId, hiveClientConfig);
 
         hdfsEnvironment = new HdfsEnvironment(hdfsConfiguration, hiveClientConfig);
-        locationService = new HiveLocationService(metastoreClient, hdfsEnvironment);
         metastoreClient = new TestingHiveMetastore(hiveCluster, executor, hiveClientConfig, writableBucket, hdfsEnvironment);
+        locationService = new HiveLocationService(metastoreClient, hdfsEnvironment);
         TypeRegistry typeManager = new TypeRegistry();
         JsonCodec<PartitionUpdate> partitionUpdateCodec = JsonCodec.jsonCodec(PartitionUpdate.class);
         metadata = new HiveMetadata(
@@ -319,7 +319,7 @@ public abstract class AbstractTestHiveClientS3
         // write the records
         ConnectorPageSink sink = pageSinkProvider.createPageSink(SESSION, outputHandle);
         sink.appendPage(data.toPage(), null);
-        Collection<Slice> fragments = sink.commit();
+        Collection<Slice> fragments = sink.finish();
 
         // commit the table
         metadata.commitCreateTable(SESSION, outputHandle, fragments);
